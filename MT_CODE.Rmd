@@ -1,0 +1,243 @@
+---
+title: "MT"
+author: "ZHE SHI"
+date: "5/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## data preprocessing
+```{r}
+library(tidyverse)
+price <- read.csv('prices.csv') %>%
+  select('symbol', 'date', 'adj_close')
+report <- read.csv('reports.csv')
+report <- filter(report, doc_type == '10-Q') %>%
+  select(-c('end_date','amend', 'period_focus', 'doc_type') ) 
+price$date <- substr(price$date, 1,4)
+price_1 <- price %>% group_by(symbol, date) %>%
+  summarise(price = mean(adj_close)) %>%
+  mutate(relative_return = ((price/lag(price) - 1) * 100))
+
+report_1 <-report %>% group_by(symbol, fiscal_year) %>%
+    summarise(revenues = mean(revenues),
+              op_income = mean(fiscal_year),
+              net_income = mean(net_income),
+              eps_basic = mean(eps_basic),
+              eps_diluted = mean(eps_diluted),
+              dividend = mean(dividend),
+              assets = mean(assets),
+              cur_assets = mean(cur_assets),
+              cur_liab = mean(cur_liab),
+              cash = mean(cash),
+              equity = mean(equity),
+              cash_flow_op = mean(cash_flow_op),
+              cash_flow_inv = mean(cash_flow_inv),
+              cash_flow_fin = mean(cash_flow_fin)
+              )  
+
+report_1 <- rename(report_1, date = fiscal_year)
+
+data <- merge(price_1, report_1, by = c('symbol','date'))
+
+data <- data %>% filter(date != 2009)
+```
+
+
+```{r}
+return.m <- data %>% group_by(date) %>% summarise(return.m = mean(relative_return, na.rm = TRUE))
+
+year_2010 <-filter(data, date == 2010) %>%
+  mutate(return = relative_return - return.m$return.m[1])
+year_2011 <- filter(data, date == 2011) %>%
+  mutate(return = relative_return - return.m$return.m[2])
+year_2012 <- filter(data, date == 2012) %>%
+  mutate(return = relative_return - return.m$return.m[3])
+year_2013 <- filter(data, date == 2013) %>%
+  mutate(return = relative_return - return.m$return.m[4])
+year_2014 <- filter(data, date == 2014) %>%
+  mutate(return = relative_return - return.m$return.m[5])
+year_2015 <- filter(data, date == 2015) %>%
+  mutate(return = relative_return - return.m$return.m[6])
+data_1 <- rbind(year_2010, year_2011, year_2012, year_2013, year_2014, year_2015) %>% 
+  select(-c('price', 'relative_return'))
+```
+
+
+
+```{r}
+write.csv(data_1,'data.csv', row.names = FALSE)
+```
+
+```{r}
+library(caret)
+data_1$return <- ifelse(data_1$return > 0, 1,0)
+data_1$return <- factor(data_1$return, levels = 0:1, labels = c('sell', 'buy'))
+in_train <- createDataPartition(data_1$return, p = 0.8, list = FALSE)
+training <- data_1[in_train, ] %>% select(-c('symbol', 'date')) %>%
+  mutate_at(c('revenues', 'op_income', 'net_income', 'eps_basic', 'eps_diluted',
+              'dividend', 'assets', 'cur_assets', 'cur_liab', 'cash', 'equity',
+              'cash_flow_op', 'cash_flow_inv', 'cash_flow_fin'),  ~(scale(.) %>% as.vector)) %>%
+           na.omit()
+testing <- data_1[-in_train, ] %>% select(-c('symbol', 'date')) %>% 
+  mutate_at(c('revenues', 'op_income', 'net_income', 'eps_basic', 'eps_diluted',
+              'dividend', 'assets', 'cur_assets', 'cur_liab', 'cash', 'equity',
+              'cash_flow_op', 'cash_flow_inv', 'cash_flow_fin'),  ~(scale(.) %>% as.vector)) %>%
+           na.omit()
+```
+
+## random forest
+```{r}
+library(randomForest)
+model1 <- randomForest(return ~ ., data = training, importance = TRUE)
+# tune the parameter
+(model2 <- randomForest(return ~ ., data = training, ntree = 500, mtry = 6, importance = TRUE))
+```
+
+```{r}
+predM_1 <- predict(model1, testing, type = "class")
+mean(predM_1 == testing$return)                    
+table(predM_1 == testing$return)
+
+predM_2 <- predict(model2, testing, type = "class")
+mean(predM_2 == testing$return)                    
+table(predM_2 == testing$return)
+```
+
+```{r}
+importance(model1)        
+varImpPlot(model1)   
+```
+## feed forward neural network
+
+```{r}
+clean_d <- read.csv('data.csv')
+clean_d$return <- ifelse(clean_d$return > 0, 1,0)
+clean_d <- clean_d %>% mutate_at(c('revenues', 'op_income', 'net_income', 'eps_basic', 'eps_diluted',
+              'dividend', 'assets', 'cur_assets', 'cur_liab', 'cash', 'equity',
+              'cash_flow_op', 'cash_flow_inv', 'cash_flow_fin'),  ~(scale(.) %>% as.vector)) %>%
+           na.omit()
+X <- clean_d %>% select(-c('symbol', 'date', 'return'))
+y <- clean_d$return
+```
+
+```{r}
+rand_vector <- runif(ncol(X) * nrow(X))
+rand_matrix <- matrix(
+  rand_vector,
+  nrow = ncol(X),
+  ncol = nrow(X),
+  byrow = TRUE
+)
+```
+
+
+```{r}
+my_nn <- list(
+  input = X,
+  weights1 = rand_matrix,
+  weights2 = matrix(runif(3283), ncol = 1),
+  y = y,
+  output = matrix(
+    rep(0, times = 3283),
+    ncol = 1
+  )
+)
+
+
+sigmoid <- function(x) {
+  1.0 / (1.0 + exp(-x))
+}
+
+sigmoid_derivative <- function(x) {
+  x * (1.0 - x)
+}
+
+
+loss_function <- function(nn) {
+  sum((nn$y - nn$output) ^ 2)
+}
+
+feedforward <- function(nn) {
+
+  nn$layer1 <- sigmoid(as.matrix(nn$input) %*% nn$weights1)
+  nn$output <- sigmoid(nn$layer1 %*% nn$weights2)
+
+  nn
+}
+```
+
+
+```{r}
+# number of times to perform feedforward
+n <- 1500
+
+loss_df <- data.frame(
+  iteration = 1:n,
+  loss = vector("numeric", length = n)
+)
+
+for (i in 1:1500) {
+  my_nn <- feedforward(my_nn)
+  loss_df$loss[i] <- loss_function(my_nn)
+}
+
+
+result <- data.frame(
+  "Predicted" = round(my_nn$output, 3),
+  "Actual" = y
+)
+
+(Accuracy <- mean(result$Predicted == result$Actual))
+```
+
+
+
+
+```{r}
+library(neuralnet)
+data_1 <- read.csv('data.csv')
+data_1$return <- ifelse(data_1$return > 0, 1,0) 
+data_1$return <- factor(data_1$return, levels = 0:1, labels = c('sell', 'buy'))
+data_1 <- data_1[,3:17] %>% na.omit()
+in_train <- createDataPartition(data_1$return, p = 0.8, list = FALSE)
+training <- data_1[in_train, ]  %>%
+  mutate_at(c('revenues', 'op_income', 'net_income', 'eps_basic', 'eps_diluted',
+              'dividend', 'assets', 'cur_assets', 'cur_liab', 'cash', 'equity',
+              'cash_flow_op', 'cash_flow_inv', 'cash_flow_fin'),  ~(scale(.) %>% as.vector)) 
+testing <- data_1[-in_train, ] %>% 
+  mutate_at(c('revenues', 'op_income', 'net_income', 'eps_basic', 'eps_diluted',
+              'dividend', 'assets', 'cur_assets', 'cur_liab', 'cash', 'equity',
+              'cash_flow_op', 'cash_flow_inv', 'cash_flow_fin'),  ~(scale(.) %>% as.vector))
+```
+
+## FFN another try
+
+```{r}
+n <- names(training)
+f <- as.formula(paste("return ~", paste(n[!n %in% "return"], collapse = " + ")))
+nn <- neuralnet(f,data=training,hidden=c(5,3),linear.output=T, rep =1, stepmax = 1e+06)
+```
+
+```{r}
+plot(nn)
+```
+
+```{r}
+Predict = compute(nn,testing)
+prob <- Predict$net.result
+nn_result <- factor(prob[,1] < 0.5, levels = c(TRUE, FALSE), labels = c("sell", "buy")) 
+confusionMatrix(nn_result, reference = testing$return)
+```
+
+
+```{r}
+table(testing$return)
+table(training$return)
+```
+
+
+

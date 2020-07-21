@@ -1,0 +1,372 @@
+---
+title: "DV assignment 4"
+author: "ZHE SHI"
+date: "5/18/2020"
+output: html_document
+---
+
+```{r}
+library(igraph)
+library(tidyverse)
+library(lubridate)
+library(rtweet)
+library(ggthemes)
+senator_tweets <- readRDS("senator_tweets.RDS")
+```
+
+## 1 a)
+
+solution 1
+```{r}
+edge_list <- read.csv('senators_follow.csv')
+d1 <-edge_list %>% select(-'followed_by') %>% filter(following == TRUE) %>% select(from = source, to = target)
+d2 <-edge_list %>% select(-'following') %>% filter(followed_by == TRUE) %>% select(from = target, to = source)
+edge <- rbind(d1,d2) %>% unique()
+# three senators who follow the most of their colleagues
+count(edge, from, sort = TRUE) %>% head(3)
+# three senators who are followed by the most of their colleagues (
+count(edge, to, sort = TRUE) %>% head(3)
+```
+
+
+solution 2
+```{r}
+g <- graph_from_data_frame(edge)
+igraph::degree(g, mode = "in") %>% sort(decreasing = TRUE) %>% head(3)
+igraph::degree(g, mode = "out") %>% sort(decreasing = TRUE) %>% head(3)
+```
+
+
+```{r}
+node <- read.csv('senators_twitter.csv')[,3:4]
+
+edge[which(! edge$from %in% node$Official.Twitter) ,1] %>% unique()
+edge[which(! edge$to %in% node$Official.Twitter) ,2] %>% unique()
+```
+
+```{r}
+node$Official.Twitter <- as.character(node$Official.Twitter)
+node[64, 1] <- 'JimInhofe'
+node[63, 1] <- 'senrobportman'
+node[37, 1] <- 'SenMarkey'
+node[29, 1] <- 'senatemajldr'
+node[16, 1] <- 'sendavidperdue'
+```
+
+
+```{r}
+net <- graph_from_data_frame(d = edge, vertices=node, directed=T) 
+
+colors <- c('blue', 'yellow', 'red')
+V(net)$color <- colors[node$Party.affiliation]
+
+# shrink the size by 10 to have a better graph
+V(net)$size <- centralization.degree(net)$res/10
+
+plot(net, vertex.label = NA, edge.arrow.size=.1, edge.color = 'black')
+legend(x=-1.5, y=-1.1, c("Democratic","Independent", "Republican"), pch=21,
+
+       col="#777777", pt.bg=colors, pt.cex=2, cex=.8, bty="n", ncol=1)
+```
+
+the only comment i can make is that the inner connection(same party) is much stronger than 
+the outer connection (different party).
+
+## 1.b
+```{r}
+wc <- cluster_walktrap(net) 
+members <- membership(wc)
+plot(wc, net, col = members, mark.groups = communities(wc), vertex.label = NA)
+```
+
+this method is poor to show the accuracy, let me try another one
+
+```{r}
+plot(node$Party.affiliation)
+new_community <-factor(members, levels = 1:3, labels = c('Republican', 'Democratic', 'Independent'))
+plot(new_community)
+```
+
+i think the cluster_walktrap works good for detecting densely connected subgraphs.
+
+
+## 2.a
+
+```{r}
+topic <- filter(senator_tweets, !is_retweet) %>% select(created_at, hashtags) 
+topic$created_at <- topic$created_at %>% substr(1, 4)
+colnames(topic) <- c('year', 'content')
+
+year_num <- topic$year %>% unique()
+
+listofdfs <- list()
+for (i in 1:length(year_num)){
+  un_content <-topic %>% filter(year == year_num[i]) %>% 
+    select('content') %>% unlist() %>% data.frame() %>% na.omit()
+  row.names(un_content) <- NULL
+  colnames(un_content) <- 'content'
+  count <- rep(1)
+  year <- rep(year_num[i])
+  df<- data.frame(year,un_content, count)
+  listofdfs[[i]] <- df
+}
+
+
+dat <- do.call(rbind, listofdfs)
+```
+
+i find that somne content should be the same topic but as regareded as different ones due to 
+lower letter/ upper letter etc. therefore, i need to fix this problem first.
+
+```{r, fig.width= 10}
+library()
+dat$year <- dat$year %>% as.character() %>% as.numeric()
+dat$content <-dat$content %>% as.character()
+dat$content <-dat$content %>% tolower()
+dat[dat$content == 'al', "content"] <- 'alabama'
+
+dat %>% group_by(year, content) %>% summarise(n = sum(count)) %>% top_n(n = 1, wt = n)  %>%
+                ungroup() %>%
+                arrange(year) %>%
+  ggplot(aes(year, n)) + geom_line() +
+  geom_text(aes(label= content, x= year, y= n - 10), hjust = 1, color='red') +
+  scale_x_discrete() +
+  theme_fivethirtyeight() + theme(axis.title.y=element_blank(), axis.text.y=element_blank(),
+                                  axis.ticks.y=element_blank()) +
+  ggtitle("Most Common Hashtags Over Time")
+```
+
+
+## 2.b
+
+let's first check whether the tweet related to the inqury conains the hastags #MerryImpeachmas.
+```{r}
+hastags <- lapply(senator_tweets$hashtags, function(x) x[!is.na(x)])
+hastags <- tolower(hastags)
+str_detect(hastags, 'merryimpeachmas') %>% sum()
+```
+the result shows that no tweets contains the hastags  #MerryImpeachmas.  therefore, we have to change the strategy.
+
+
+```{r}
+DvR <- senator_tweets%>% select(created_at, screen_name, hashtags, text)
+DvR$created_at <- DvR$created_at %>% substr(1,7) %>% str_replace('-', '.') %>% as.numeric()
+DvR <- DvR %>% filter(created_at >= 2019.09 & created_at <= 2019.12 & hashtags != 'NA') 
+```
+
+
+```{r}
+DvR$hashtags %>% as.character() %>% unique() %>% length()
+```
+well, it seems that it's not feasible to filter the hastags related to the impeachment inquiry manually, let
+along whether it's the positive emotion or negative emotion. i am thinking whether i can analyse the text directly
+and skip the hastags.
+
+
+```{r}
+party <- read.csv('senators_twitter.csv') %>% select(screen_name = 'Official.Twitter', 'Party.affiliation')
+impeachment <- DvR %>% filter(str_detect(text, paste(c('impeach'),collapse = '|'))) %>%
+  group_by(screen_name) %>% summarise(text_m = paste(text, collapse =" ")) %>% 
+  left_join(party)
+impeachment[is.na(impeachment$Party.affiliation), 'Party.affiliation'] <- rep('Republican Party', 4)
+```
+
+
+```{r}
+pos <- read.table("positive-words.txt", as.is=T)
+neg <- read.table("negative-words.txt", as.is=T)
+
+sentiment <- function(words=c("really great good stuff bad")){
+  require(quanteda)
+  tok <- quanteda::tokens(words)
+  pos.count <- sum(tok[[1]]%in%pos[,1])
+  cat("\n positive words:",tok[[1]][which(tok[[1]]%in%pos[,1])],"\n")
+  neg.count <- sum(tok[[1]]%in%neg[,1])
+  cat("\n negative words:",tok[[1]][which(tok[[1]]%in%neg[,1])],"\n")
+  out <- (pos.count - neg.count)/(pos.count+neg.count)
+  cat("\n Tone of Document:",out)
+}
+
+sentiment(impeachment$text_m[1])
+```
+trying to use sentiments analysis to differentiate support/against but fails. iguess i have to do it manually.
+
+```{r}
+impeachment$sentiment <- c(0, 0, 1, 0, 1, 0, 0, 1, -1, -1, -1, 0, -1, -1, -1, 1, -1, 0, -1, -1,
+  0, 1, -1, 0, 0, 0, -1, -1, 0, 1, -1, 1, -1, -1, -1, 1)
+```
+
+denote 1= support impeachment, 0 = natural, -1 = against impeachment
+
+```{r}
+impeachment %>% group_by(Party.affiliation) %>% summarise(attitude = mean(sentiment))
+```
+the result is kind of werried that both parties are against the impeachment. but the republican party seems 
+hate the impeachment trial more. i guess the reasoning behind this is that some events are happening at the 
+same time with this trial and most republican senators are advocating amercians to pay more attentention on 
+the other crtical things rather than on the impeachment trial. that's the reason why their attitude are against 
+the impeachment.
+
+## 2.c
+```{r}
+ggplot(impeachment) + geom_point(aes(1:36,sentiment, color = Party.affiliation)) +
+  scale_x_discrete() +
+  theme_fivethirtyeight() +
+  ggtitle("Senators' response to the events in their Twitter communication")
+  
+```
+
+## 3.a
+
+```{r}
+retweet <- senator_tweets %>% filter(is_retweet) %>% select('screen_name', 'mentions_screen_name')
+retweet<- retweet %>% filter(retweet$screen_name != retweet$mentions_screen_name) 
+senator_name <- senator_tweets$screen_name %>% unique() 
+retweet <-filter(retweet, str_detect(as.character(retweet$mentions_screen_name), 
+                                     paste(senator_name, collapse = '|'))) %>% unique()
+```
+
+i've tried the str_split() to split diiferent values in the mention_screen_name column but the results looks
+awful as there exist c('', ''). i don't know how to remove c(''). therefore, i have to write a loop to fix this 
+problem. 
+
+
+```{r}
+listofdfs <- list()
+
+for (i in 1:length(senator_name)){
+  mention_name <- retweet %>% filter(screen_name == senator_name[i]) %>%
+    select('mentions_screen_name') %>% unlist() %>% data.frame() %>% na.omit()
+  row.names(mention_name) <- NULL
+  colnames(mention_name) <- 'mentions_screen_name'
+  screen_name <- rep(senator_name[i])
+  df<- data.frame(screen_name, mention_name)
+  listofdfs[[i]] <- df
+}
+
+dat <- do.call(rbind, listofdfs) %>% unique()
+dat <- dat %>% filter(dat$mentions_screen_name %in% senator_name)
+dat[,] <- lapply(dat[,], as.character) 
+dat <- dat %>% filter(dat$screen_name != dat$mentions_screen_name)
+```
+
+```{r}
+party[,] <- lapply(party[,], as.character) 
+party %>% filter(!party$screen_name %in% senator_name)
+```
+
+```{r}
+party$screen_name <- gsub('SenDavidPerdue', 'sendavidperdue', party$screen_name)
+party$screen_name <- gsub('SenateMajLdr', 'senatemajldr', party$screen_name)
+party$screen_name <- gsub('senmarkey', 'SenMarkey', party$screen_name)
+party$screen_name <- gsub('SenRobPortman', 'senrobportman', party$screen_name)
+party$screen_name <- gsub('jiminhofe', 'JimInhofe', party$screen_name)
+```
+
+
+```{r}
+for (i in 1:dim(dat)[1]){
+  dat$screen_name_party[i] <- party[party$screen_name == dat$screen_name[i], 2]
+  dat$mention_name_party[i] <- party[party$screen_name == dat$mentions_screen_name[i], 2]
+}
+
+dat$count <- rep(1)
+```
+
+```{r}
+retweet_data <- dat %>% group_by(screen_name, screen_name_party ,mention_name_party) %>% summarise(n = sum(count)) 
+retweet_data %>% head(10)
+```
+
+```{r, fig.width= 9, fig.height=10}
+ggplot(retweet_data, aes(screen_name, n, color = mention_name_party)) + geom_point() +
+  facet_wrap(~screen_name_party, ncol = 1) +
+  theme_fivethirtyeight() +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("retweet")
+```
+
+well, basically i can conclude that senators belongs to the same party will retweet to each other more then people
+belongs to the differnt party. 
+
+several senators just get retweet from their ouwn parties but most of the senators get retweet from both sides except
+the independent category.
+
+## 3.b
+
+kinda of similar as the 3.a so i just cppy some the steps above
+
+```{r}
+mention <- senator_tweets %>% filter(is_retweet == FALSE) %>% select('screen_name', 'mentions_screen_name')
+mention <-filter(mention, str_detect(as.character(mention$mentions_screen_name), 
+                                     paste(senator_name, collapse = '|')))
+
+listofdfs <- list()
+
+for (i in 1:length(senator_name)){
+  mention_name <- mention %>% filter(screen_name == senator_name[i]) %>%
+    select('mentions_screen_name') %>% unlist() %>% data.frame() %>% na.omit()
+  row.names(mention_name) <- NULL
+  colnames(mention_name) <- 'mentions_screen_name'
+  screen_name <- rep(senator_name[i])
+  df<- data.frame(screen_name, mention_name)
+  listofdfs[[i]] <- df
+}
+
+dat <- do.call(rbind, listofdfs) 
+dat <- dat %>% filter(dat$mentions_screen_name %in% senator_name)
+dat[,] <- lapply(dat[,], as.character) 
+
+for (i in 1:dim(dat)[1]){
+  dat$screen_name_party[i] <- party[party$screen_name == dat$screen_name[i], 2]
+  dat$mention_name_party[i] <- party[party$screen_name == dat$mentions_screen_name[i], 2]
+}
+
+dat$count <- rep(1)
+```
+
+```{r}
+edge <- dat %>% group_by(screen_name, mentions_screen_name) %>% summarise(weight = sum(count))
+node <- as.data.frame(senator_name)
+for (i in 1:dim(node)[1]){
+  node$party[i] <- party[party$screen_name == node$senator_name[i], 2]
+}
+
+
+for (i in 1:dim(node)[1]) {
+  if (node$party[i] == 'Republican Party') {
+    node$color[i] <- 'red' 
+  } else if (node$party[i] == 'Democratic Party') {
+    node$color[i] <- 'blue' 
+  } else {
+    node$color[i] <- 'gold'
+  }
+    
+}
+
+node$party <- factor(node$party)
+```
+
+```{r}
+net <- graph_from_data_frame(d = edge, vertices=node, directed= FALSE) 
+E(net)$width <- E(net)$weight/20
+V(net)$label <- NA
+V(net)$size <- centralization.degree(net)$res/10
+```
+
+
+
+```{r}
+plot(net)
+legend(x=-1.5, y=-1.1, c("Republican Party","Democratic Party", "Independent"), pch=21,
+
+       col="#777777", pt.bg=c('red', 'blue', 'gold'), pt.cex=2, cex=.8, bty="n", ncol=1)
+```
+most senators tweet to each other but few has limited contact with others. silimar to the conclusion as
+the 3.a, the conneection within the same part is stronger than that outside the same party. in addition, several
+senators also mention to themselves. as for the centrality, both parties have the similar number of senators in the
+middle. 
+
+
